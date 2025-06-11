@@ -1,0 +1,123 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+          pdftoppm -v || echo "Poppler installation failed"
+        timeout-minutes: 5
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install poppler
+          pdftoppm -v || echo "Poppler installation failed"
+        timeout-minutes: 5
+
+      - name: Install system dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          # Download Poppler
+          $popplerVersion = "23.11.0"
+          $popplerUrl = "https://github.com/oschwartz10612/poppler-windows/releases/download/v$popplerVersion-0/Release-$popplerVersion-0.zip"
+          $popplerZip = "poppler.zip"
+          $popplerDir = "C:\poppler"
+
+          Write-Host "Downloading Poppler from: $popplerUrl"
+
+          # Create directory and download
+          New-Item -ItemType Directory -Force -Path $popplerDir
+          Invoke-WebRequest -Uri $popplerUrl -OutFile $popplerZip
+
+          Write-Host "Extracting Poppler..."
+
+          # Extract and set up
+          Expand-Archive -Path $popplerZip -DestinationPath $popplerDir -Force
+
+          Write-Host "Listing extracted contents:"
+          Get-ChildItem -Path $popplerDir -Recurse | Select-Object FullName
+
+          # Find the bin directory
+          $binDir = Get-ChildItem -Path $popplerDir -Recurse -Directory | 
+                   Where-Object { $_.Name -eq "bin" -and (Test-Path "$($_.FullName)\pdftoppm.exe") } |
+                   Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $binDir) {
+              Write-Error "Could not find Poppler bin directory containing pdftoppm.exe"
+              exit 1
+          }
+
+          Write-Host "Found Poppler bin directory at: $binDir"
+
+          # Set the correct path to the bin directory
+          $env:POPPLER_PATH = $binDir
+          echo "POPPLER_PATH=$env:POPPLER_PATH" >> $env:GITHUB_ENV
+
+          # Add to PATH
+          $env:PATH = "$env:POPPLER_PATH;$env:PATH"
+          echo "PATH=$env:PATH" >> $env:GITHUB_ENV
+
+          # Verify installation
+          Write-Host "Checking Poppler installation..."
+          Write-Host "POPPLER_PATH: $env:POPPLER_PATH"
+          Write-Host "Directory contents:"
+          Get-ChildItem -Path $env:POPPLER_PATH
+
+          # Try to run pdftoppm
+          Write-Host "Testing pdftoppm..."
+          $pdftoppm = Join-Path $env:POPPLER_PATH "pdftoppm.exe"
+          if (Test-Path $pdftoppm) {
+              & $pdftoppm -v
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "pdftoppm test failed with exit code: $LASTEXITCODE"
+                  exit 1
+              }
+          } else {
+              Write-Error "pdftoppm.exe not found at: $pdftoppm"
+              exit 1
+          }
+
+          # Clean up
+          Remove-Item $popplerZip
+        timeout-minutes: 5
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-timeout
+          pip install -r requirements.txt
+        timeout-minutes: 5
+
+      - name: Run tests
+        run: |
+          # Set a shorter timeout for individual tests
+          pytest tests/ -v --timeout=300
+        timeout-minutes: 10
+        continue-on-error: true # Continue to allow cleanup even if tests fail

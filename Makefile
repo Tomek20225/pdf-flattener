@@ -23,3 +23,7 @@ clean:
 
 # Full build and install process
 reinstall: clean build install
+
+# Run tests
+test:
+	pytest tests/
